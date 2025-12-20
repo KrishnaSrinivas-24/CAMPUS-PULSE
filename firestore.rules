@@ -1,0 +1,149 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ============================================
+    // HELPER FUNCTIONS
+    // ============================================
+    
+    // Check if user is authenticated
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Check if user is the owner of a document
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Check if user has a specific role
+    function hasRole(role) {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role;
+    }
+    
+    // Check if user is an organization admin
+    function isOrgAdmin(orgId) {
+      return isAuthenticated() && 
+             get(/databases/$(database)/documents/organizations/$(orgId)).data.admins.hasAny([request.auth.uid]);
+    }
+
+    // ============================================
+    // USERS COLLECTION
+    // ============================================
+    match /users/{userId} {
+      // Users can read their own profile
+      allow read: if isOwner(userId);
+      
+      // Users can create their own profile during signup
+      allow create: if isOwner(userId);
+      
+      // Users can update their own profile (except role)
+      allow update: if isOwner(userId) && 
+                       (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']));
+      
+      // Only admins can delete users (not implemented here for safety)
+      allow delete: if false;
+    }
+
+    // ============================================
+    // ORGANIZATIONS COLLECTION
+    // ============================================
+    match /organizations/{orgId} {
+      // Anyone can read verified organizations
+      allow read: if resource.data.verified == true || isOrgAdmin(orgId);
+      
+      // Authenticated users can create organizations (pending verification)
+      allow create: if isAuthenticated();
+      
+      // Only org admins can update their organization
+      allow update: if isOrgAdmin(orgId);
+      
+      // Organizations cannot be deleted (archive instead)
+      allow delete: if false;
+    }
+
+    // ============================================
+    // EVENTS COLLECTION
+    // ============================================
+    match /events/{eventId} {
+      // Public events are readable by everyone
+      allow read: if resource.data.visibility == 'public' || 
+                     isAuthenticated();
+      
+      // Only org admins can create events
+      allow create: if isAuthenticated() && 
+                       isOrgAdmin(request.resource.data.organizerId);
+      
+      // Only the organizer can update events
+      allow update: if isOrgAdmin(resource.data.organizerId);
+      
+      // Only the organizer can delete events
+      allow delete: if isOrgAdmin(resource.data.organizerId);
+    }
+
+    // ============================================
+    // REGISTRATIONS COLLECTION
+    // ============================================
+    match /registrations/{regId} {
+      // Users can read their own registrations
+      allow read: if isOwner(resource.data.userId) || 
+                     isOrgAdmin(resource.data.organizerId);
+      
+      // Authenticated users can register for events
+      allow create: if isAuthenticated() && 
+                       request.resource.data.userId == request.auth.uid;
+      
+      // Only org admins can update registrations (e.g., check-in)
+      allow update: if isOrgAdmin(resource.data.organizerId);
+      
+      // Users can cancel their own registrations
+      allow delete: if isOwner(resource.data.userId);
+    }
+
+    // ============================================
+    // MERCHANDISE COLLECTION
+    // ============================================
+    match /merchandise/{itemId} {
+      // Everyone can read merchandise
+      allow read: if true;
+      
+      // Only org admins can manage merchandise
+      allow write: if isOrgAdmin(resource.data.organizerId);
+    }
+
+    // ============================================
+    // REDEMPTIONS COLLECTION
+    // ============================================
+    match /redemptions/{redemptionId} {
+      // Users can read their own redemptions
+      allow read: if isOwner(resource.data.userId) || 
+                     isOrgAdmin(resource.data.organizerId);
+      
+      // Users can create redemptions
+      allow create: if isAuthenticated() && 
+                       request.resource.data.userId == request.auth.uid;
+      
+      // Only org admins can update redemptions (fulfill)
+      allow update: if isOrgAdmin(resource.data.organizerId);
+      
+      allow delete: if false;
+    }
+
+    // ============================================
+    // GUEST REGISTRATIONS (No Auth Required)
+    // ============================================
+    match /guestRegistrations/{regId} {
+      // Anyone can read with the registration ID (for ticket lookup)
+      allow read: if true;
+      
+      // Anyone can create a guest registration
+      allow create: if true;
+      
+      // Only org admins can update (check-in)
+      allow update: if isOrgAdmin(resource.data.organizerId);
+      
+      allow delete: if false;
+    }
+  }
+}

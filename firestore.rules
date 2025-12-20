@@ -11,139 +11,263 @@ service cloud.firestore {
       return request.auth != null;
     }
     
-    // Check if user is the owner of a document
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+    // Get current user's document
+    function getUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
     }
     
-    // Check if user has a specific role
-    function hasRole(role) {
-      return isAuthenticated() && 
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role;
+    // Get user role
+    function getUserRole() {
+      return getUserDoc().data.role;
     }
     
-    // Check if user is an organization admin
+    // Get user department
+    function getUserDepartment() {
+      return getUserDoc().data.profile.department;
+    }
+    
+    // Check if user is admin of an organization
     function isOrgAdmin(orgId) {
       return isAuthenticated() && 
-             get(/databases/$(database)/documents/organizations/$(orgId)).data.admins.hasAny([request.auth.uid]);
+        exists(/databases/$(database)/documents/organizations/$(orgId)) &&
+        request.auth.uid in get(/databases/$(database)/documents/organizations/$(orgId)).data.admins;
     }
-
+    
+    // Check if user is member of an organization
+    function isOrgMember(orgId) {
+      let org = get(/databases/$(database)/documents/organizations/$(orgId));
+      let members = org.data.members;
+      return isAuthenticated() && 
+        (request.auth.uid in org.data.admins || 
+         members.hasAny([{'userId': request.auth.uid}]));
+    }
+    
+    // Check if user is a campus user (student, faculty, or staff)
+    function isCampusUser() {
+      let role = getUserRole();
+      return role == 'student' || role == 'faculty' || role == 'staff';
+    }
+    
+    // Check if user is faculty
+    function isFaculty() {
+      return getUserRole() == 'faculty';
+    }
+    
+    // Check if user is student
+    function isStudent() {
+      return getUserRole() == 'student';
+    }
+    
+    // Check if user can view event based on eligibility
+    function canViewEvent(event) {
+      let eligibility = event.eligibility.type;
+      let userRole = getUserRole();
+      let userDept = getUserDepartment();
+      
+      // Open events - everyone can view
+      if (eligibility == 'open') {
+        return true;
+      }
+      
+      // Campus only - must be student, faculty, or staff
+      if (eligibility == 'campus_only') {
+        return userRole in ['student', 'faculty', 'staff'];
+      }
+      
+      // Students only
+      if (eligibility == 'students_only') {
+        return userRole == 'student';
+      }
+      
+      // Faculty only - students cannot see these
+      if (eligibility == 'faculty_only') {
+        return userRole == 'faculty' || userRole == 'staff';
+      }
+      
+      // Department specific - check if user's department is in allowed list
+      if (eligibility == 'department_specific') {
+        return userDept in event.eligibility.allowedDepartments;
+      }
+      
+      return false;
+    }
+    
     // ============================================
     // USERS COLLECTION
     // ============================================
+    
     match /users/{userId} {
       // Users can read their own profile
-      allow read: if isOwner(userId);
+      // Other users can read basic profile info (for leaderboard, friends)
+      allow read: if isAuthenticated();
       
-      // Users can create their own profile during signup
-      allow create: if isOwner(userId);
+      // Users can only write to their own document
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      allow update: if isAuthenticated() && request.auth.uid == userId;
       
-      // Users can update their own profile (except role)
-      allow update: if isOwner(userId) && 
-                       (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['role']));
-      
-      // Only admins can delete users (not implemented here for safety)
+      // No delete allowed
       allow delete: if false;
     }
-
+    
     // ============================================
     // ORGANIZATIONS COLLECTION
     // ============================================
+    
     match /organizations/{orgId} {
-      // Anyone can read verified organizations
-      allow read: if resource.data.verified == true || isOrgAdmin(orgId);
+      // Anyone authenticated can read organizations
+      allow read: if isAuthenticated();
       
-      // Authenticated users can create organizations (pending verification)
+      // Only org admins can update
       allow create: if isAuthenticated();
-      
-      // Only org admins can update their organization
       allow update: if isOrgAdmin(orgId);
+      allow delete: if isOrgAdmin(orgId);
       
-      // Organizations cannot be deleted (archive instead)
-      allow delete: if false;
+      // Organization members subcollection
+      match /members/{memberId} {
+        allow read: if isAuthenticated();
+        allow write: if isOrgAdmin(orgId);
+      }
     }
-
+    
     // ============================================
     // EVENTS COLLECTION
     // ============================================
+    
     match /events/{eventId} {
-      // Public events are readable by everyone
-      allow read: if resource.data.visibility == 'public' || 
-                     isAuthenticated();
+      // Read: Check eligibility-based visibility
+      allow read: if isAuthenticated() && (
+        // Org admins can always see their events
+        isOrgAdmin(resource.data.organizationId) ||
+        // Public/published events with visibility check
+        (resource.data.status == 'published' && canViewEvent(resource.data))
+      );
       
-      // Only org admins can create events
-      allow create: if isAuthenticated() && 
-                       isOrgAdmin(request.resource.data.organizerId);
+      // List query: Allow for filtering but Firestore will enforce doc-level rules
+      allow list: if isAuthenticated();
       
-      // Only the organizer can update events
-      allow update: if isOrgAdmin(resource.data.organizerId);
-      
-      // Only the organizer can delete events
-      allow delete: if isOrgAdmin(resource.data.organizerId);
+      // Only org admins can create/update/delete events
+      allow create: if isAuthenticated() && isOrgAdmin(request.resource.data.organizationId);
+      allow update: if isOrgAdmin(resource.data.organizationId);
+      allow delete: if isOrgAdmin(resource.data.organizationId);
     }
-
+    
     // ============================================
     // REGISTRATIONS COLLECTION
     // ============================================
+    
     match /registrations/{regId} {
       // Users can read their own registrations
-      allow read: if isOwner(resource.data.userId) || 
-                     isOrgAdmin(resource.data.organizerId);
+      // Org admins can read all registrations for their events
+      allow read: if isAuthenticated() && (
+        request.auth.uid == resource.data.userId ||
+        isOrgAdmin(resource.data.organizationId)
+      );
       
-      // Authenticated users can register for events
+      // Users can create registration for themselves
       allow create: if isAuthenticated() && 
-                       request.resource.data.userId == request.auth.uid;
+        request.auth.uid == request.resource.data.userId;
       
-      // Only org admins can update registrations (e.g., check-in)
-      allow update: if isOrgAdmin(resource.data.organizerId);
+      // Users can update their own (cancel)
+      // Org admins can update any registration (attendance)
+      allow update: if isAuthenticated() && (
+        request.auth.uid == resource.data.userId ||
+        isOrgAdmin(resource.data.organizationId)
+      );
       
-      // Users can cancel their own registrations
-      allow delete: if isOwner(resource.data.userId);
+      // Only org admins can delete registrations
+      allow delete: if isOrgAdmin(resource.data.organizationId);
     }
-
+    
+    // ============================================
+    // LEADERBOARDS COLLECTION
+    // ============================================
+    
+    match /leaderboards/{leaderboardId} {
+      // Everyone can read leaderboards
+      allow read: if isAuthenticated();
+      
+      // Only backend (admin) can write - use Cloud Functions
+      allow write: if false;
+    }
+    
+    // Global leaderboard document
+    match /leaderboards/global {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+    
     // ============================================
     // MERCHANDISE COLLECTION
     // ============================================
+    
     match /merchandise/{itemId} {
-      // Everyone can read merchandise
-      allow read: if true;
+      // Everyone can read available merchandise
+      allow read: if isAuthenticated() && resource.data.available == true;
       
       // Only org admins can manage merchandise
-      allow write: if isOrgAdmin(resource.data.organizerId);
+      allow create: if isAuthenticated() && isOrgAdmin(request.resource.data.organizationId);
+      allow update: if isOrgAdmin(resource.data.organizationId);
+      allow delete: if isOrgAdmin(resource.data.organizationId);
     }
-
+    
     // ============================================
     // REDEMPTIONS COLLECTION
     // ============================================
+    
     match /redemptions/{redemptionId} {
       // Users can read their own redemptions
-      allow read: if isOwner(resource.data.userId) || 
-                     isOrgAdmin(resource.data.organizerId);
+      // Org admins can read redemptions for their merchandise
+      allow read: if isAuthenticated() && (
+        request.auth.uid == resource.data.userId ||
+        isOrgAdmin(resource.data.organizationId)
+      );
       
-      // Users can create redemptions
+      // Users can create redemption for themselves
       allow create: if isAuthenticated() && 
-                       request.resource.data.userId == request.auth.uid;
+        request.auth.uid == request.resource.data.userId;
       
-      // Only org admins can update redemptions (fulfill)
-      allow update: if isOrgAdmin(resource.data.organizerId);
+      // Org admins can update status (approve, collect)
+      allow update: if isOrgAdmin(resource.data.organizationId);
       
       allow delete: if false;
     }
-
+    
     // ============================================
-    // GUEST REGISTRATIONS (No Auth Required)
+    // NOTIFICATIONS COLLECTION
     // ============================================
-    match /guestRegistrations/{regId} {
-      // Anyone can read with the registration ID (for ticket lookup)
-      allow read: if true;
+    
+    match /notifications/{notificationId} {
+      // Users can only read their own notifications
+      allow read: if isAuthenticated() && request.auth.uid == resource.data.userId;
       
-      // Anyone can create a guest registration
-      allow create: if true;
+      // Users can update (mark as read)
+      allow update: if isAuthenticated() && request.auth.uid == resource.data.userId;
       
-      // Only org admins can update (check-in)
-      allow update: if isOrgAdmin(resource.data.organizerId);
+      // Only backend can create notifications
+      allow create: if false;
+      allow delete: if isAuthenticated() && request.auth.uid == resource.data.userId;
+    }
+    
+    // ============================================
+    // YEARLY WRAPS COLLECTION
+    // ============================================
+    
+    match /yearlyWraps/{wrapId} {
+      // Users can read their own wraps
+      allow read: if isAuthenticated() && request.auth.uid == resource.data.userId;
       
-      allow delete: if false;
+      // Only backend can create/update
+      allow write: if false;
+    }
+    
+    // ============================================
+    // ANALYTICS COLLECTION (Org-specific)
+    // ============================================
+    
+    match /analytics/{orgId}/events/{eventId} {
+      // Only org admins can read analytics
+      allow read: if isOrgAdmin(orgId);
+      allow write: if false; // Backend only
     }
   }
 }

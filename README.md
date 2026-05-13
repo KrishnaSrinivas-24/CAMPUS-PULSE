@@ -11,6 +11,16 @@
 <br />
 
 <div align="center">
+  <img src="./project-pics/mobile_home.png" width="30%" alt="Mobile Home Feed" />
+  &nbsp;&nbsp;&nbsp;
+  <img src="./project-pics/qr_ticket.png" width="30%" alt="QR Ticket" />
+  &nbsp;&nbsp;&nbsp;
+  <img src="./project-pics/web_dashboard.png" width="30%" alt="Web Organization Dashboard" />
+</div>
+
+<br />
+
+<div align="center">
   <strong>Discover events. Register instantly. Earn rewards. Build your campus identity.</strong>
 </div>
 
